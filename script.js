@@ -189,8 +189,10 @@ async function loadAndRunModel (video, predictions) {
 
   // Create input image for model
   const croppedTensor = tf.slice(imageTensor, cropStartPoint, cropSize)
-  const resizedTensor = tf.image.resizeBilinear(croppedTensor, [192, 192], true).toInt()
-  const tensorOutput = poseDetectionModel.predict(tf.expandDims(resizedTensor))
+  const resizedTensor = tf.image.resizeBilinear(croppedTensor, [192, 192], true)
+  const resizedTensorInt = resizedTensor.toInt()
+  const expandedTensor = tf.expandDims(resizedTensorInt)
+  const tensorOutput = poseDetectionModel.predict(expandedTensor)
   const arrayOutput = await tensorOutput.array()
 
   // Remove previous pose
@@ -218,4 +220,6 @@ async function loadAndRunModel (video, predictions) {
   resizedTensor.dispose()
   tensorOutput.dispose()
   croppedTensor.dispose()
+  resizedTensorInt.dispose()
+  expandedTensor.dispose()
 }
