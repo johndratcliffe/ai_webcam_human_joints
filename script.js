@@ -20,7 +20,7 @@ if (getUserMediaSupported()) {
 // Enable the live webcam view and start classification.
 function enableCam (event) {
   // Only continue if the COCO-SSD has finished loading.
-  if (!model) {
+  if (!cocoModel && !poseDetectionModel) {
     return
   }
 
@@ -39,17 +39,21 @@ function enableCam (event) {
   })
 }
 
-let model
-cocoSsd.load().then(function (loadedModel) {
-  model = loadedModel
-  // Show demo section now that model is ready to use.
+let cocoModel
+let poseDetectionModel
+const MODEL_PATH = 'https://www.kaggle.com/models/google/movenet/tfJs/singlepose-lightning/1'
+async function getModels () {
+  cocoModel = await cocoSsd.load()
+  poseDetectionModel = await tf.loadGraphModel(MODEL_PATH, { fromTFHub: true })
   demosSection.classList.remove('invisible')
-})
+}
+
+getModels()
 
 const children = []
 function predictWebcam () {
   // Start classifying a frame in the stream.
-  model.detect(video).then(function (predictions) {
+  cocoModel.detect(video).then(function (predictions) {
     // Remove any highlighting we did previous frame.
     for (let i = 0; i < children.length; i++) {
       liveView.removeChild(children[i])
@@ -82,10 +86,136 @@ function predictWebcam () {
         liveView.appendChild(p)
         children.push(highlighter)
         children.push(p)
+        // Pose detection model
+        if (predictions[n].class === 'person') {
+          loadAndRunModel(video, predictions)
+        }
       }
     }
 
     // Call this function again to keep predicting when the browser is ready.
     window.requestAnimationFrame(predictWebcam)
   })
+}
+
+let dots = []
+async function loadAndRunModel (video, predictions) {
+  const imageTensor = tf.browser.fromPixels(video)
+  let cropStartPoint = [15, 170, 0]
+  let cropSize = [345, 345, 3]
+
+  // Let origin of box containing person have coordinates x,y
+  let x = predictions[0].bbox[0]
+  let y = predictions[0].bbox[1]
+
+  // Let dimensions of box be width, height
+  let width = predictions[0].bbox[2]
+  let height = predictions[0].bbox[3]
+
+  // Dimensions of entire webcam frame
+  const vid_width = 640
+  const vid_height = 480
+
+  // Predictions from COCOSSD model may be outside of the video frame, therefore
+  // correct the predictions, as they should be within the frame
+  if (y < 0) {
+    y = 0
+  }
+  if (x < 0) {
+    x = 0
+  }
+  if (height > vid_height) {
+    height = vid_height
+  } else if (y + height > vid_height) {
+    height = vid_height - y
+  }
+  if (width > vid_width) {
+    width = vid_width
+  } else if (x + width > vid_width) {
+    width = vid_width - x
+  }
+  
+  // Determine new x,y,width,height as input to posemodel is square
+  // x,y,width,height will be the parameters of the input
+  // Parameters need to be within frame otherwise issues with slicing occur
+  if (width === height) {
+    // Both origin and dimensions remain unchanged
+    cropStartPoint = [y, x, 0]
+    cropSize = [width, height, 3]
+  } else if (width > height) {
+    /*
+      --------     --------
+      |      |  -> |      |
+      --------     |      |
+                   --------
+    */
+    if (width >= vid_height) {
+      y = 0
+      x = x + width / 2 - 240
+      height = vid_height
+      width = vid_height
+    } else {
+      y = y - (width - height) / 2
+      height = width
+      if (y < 0) {
+        y = 0
+      } else if (y + height > vid_height) {
+         y = vid_height - height
+      }
+    }
+    cropStartPoint = [parseInt(y), parseInt(x), 0]
+    cropSize = [parseInt(width), parseInt(height), 3]
+  } else {
+    /*
+      -------    ----------
+      |     |    |        |
+      |     | -> |        |
+      |     |    |        |
+      -------    ----------
+    */
+    x = x - (height - width) / 2
+    width = height
+    if (x < 0) {
+      x = 0
+    } else if (x + width > vid_width) {
+      x = vid_width - width
+    }
+    if (width === vid_height) {
+      y = 0
+    }
+    cropStartPoint = [parseInt(y), parseInt(x), 0]
+    cropSize = [parseInt(width), parseInt(height), 3]
+  }
+
+  // Create input image for model
+  const croppedTensor = tf.slice(imageTensor, cropStartPoint, cropSize)
+  const resizedTensor = tf.image.resizeBilinear(croppedTensor, [192, 192], true).toInt()
+  const tensorOutput = poseDetectionModel.predict(tf.expandDims(resizedTensor))
+  const arrayOutput = await tensorOutput.array()
+
+  // Remove previous pose
+  for (let i = 0; i < dots.length; i++) {
+    liveView.removeChild(dots[i])
+  }
+  dots.splice(0)
+
+  // Dots to show new pose
+  for (let i = 0; i < 17; i++) {
+    if(arrayOutput[0][0][i][2] > 0.66) {
+      const highlighter = document.createElement('div')
+      highlighter.setAttribute('class', 'highlighted')
+      highlighter.style = 'left: ' + (x + arrayOutput[0][0][i][1] * height - 2) + 'px; top: ' +
+      (y + arrayOutput[0][0][i][0] * height - 2) + 'px; width: ' +
+          4 + 'px; height: ' +
+          4 + 'px;'
+      liveView.appendChild(highlighter)
+      dots.push(highlighter)
+    }
+  }
+
+  // Clear all tensors
+  imageTensor.dispose()
+  resizedTensor.dispose()
+  tensorOutput.dispose()
+  croppedTensor.dispose()
 }
